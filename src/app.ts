@@ -2,6 +2,9 @@ import { createHash, timingSafeEqual } from "node:crypto";
 import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import path from "node:path";
 import express, { type Express, type NextFunction, type Request, type Response } from "express";
+import type { AnalizCalistirici } from "./analiz";
+import { AZAMI_DOSYA_BAYT, DosyaHatasi, kaydet, listele, sil } from "./dosyalar";
+import { YUKLE_CSP, YUKLE_HTML } from "./yukle-sayfasi";
 
 /**
  * Paket servis raporu.
@@ -21,7 +24,7 @@ const DENEME_PENCERESI_MS = 15 * 60 * 1000;
 
 const BOS_SAYFA = `<!doctype html><html lang="tr"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Paket servis raporu</title></head><body style="font:16px system-ui,sans-serif;margin:40px">
-<h1>Paket servis raporu</h1><p>Henüz rapor yüklenmedi.</p></body></html>`;
+<h1>Paket servis raporu</h1><p>Henüz rapor yok. <a href="/yukle">Fatura yükleyin</a>.</p></body></html>`;
 
 export interface AppOptions {
   /** Raporun saklanacağı klasör (kalıcı volume). */
@@ -32,6 +35,8 @@ export interface AppOptions {
   viewPassword?: string;
   /** Sayfa kullanıcı adı (varsayılan admin). */
   viewUser?: string;
+  /** Yüklenen faturalardan raporu üretir; yoksa /api/analiz kapalıdır (501). */
+  analizCalistir?: AnalizCalistirici;
 }
 
 const sha = (s: string) => createHash("sha256").update(s).digest();
@@ -136,6 +141,67 @@ export function createApp(opts: AppOptions): Express {
     }
   };
   app.get(["/", "/paketrapor"], girisGerekli, sayfa);
+
+  // --- Fatura yükleme: oturum yerine Basic kimlik, değiştiren uçlarda özel başlık (çapraz site isteği ön kontrolde elenir) ---
+  const faturaDir = path.join(opts.dataDir, "faturalar");
+  const ajax = (req: Request, res: Response, next: NextFunction) =>
+    req.headers["x-requested-with"] === "delrep" ? next() : void res.status(400).json({ error: "Geçersiz istek." });
+  const hata = (res: Response, e: unknown) => {
+    if (e instanceof DosyaHatasi) return void res.status(e.status).json({ error: e.message });
+    console.error(e);
+    res.status(500).json({ error: "Sunucu hatası." });
+  };
+
+  app.get("/yukle", girisGerekli, (_req, res) => {
+    res.setHeader("Cache-Control", "no-store");
+    res.setHeader("Content-Security-Policy", YUKLE_CSP);
+    res.setHeader("X-Content-Type-Options", "nosniff");
+    res.setHeader("Referrer-Policy", "no-referrer");
+    res.type("html").send(YUKLE_HTML);
+  });
+
+  app.get("/api/dosyalar", girisGerekli, async (_req, res) => {
+    try {
+      res.setHeader("Cache-Control", "no-store");
+      res.json({ dosyalar: await listele(faturaDir) });
+    } catch (e) {
+      hata(res, e);
+    }
+  });
+
+  app.put("/api/dosyalar/:ad", girisGerekli, ajax, express.raw({ type: () => true, limit: AZAMI_DOSYA_BAYT }), async (req, res) => {
+    try {
+      const veri = Buffer.isBuffer(req.body) ? req.body : Buffer.alloc(0);
+      res.json({ ok: true, ...(await kaydet(faturaDir, req.params.ad, veri)) });
+    } catch (e) {
+      hata(res, e);
+    }
+  });
+
+  app.delete("/api/dosyalar/:ad", girisGerekli, ajax, async (req, res) => {
+    try {
+      await sil(faturaDir, req.params.ad);
+      res.json({ ok: true });
+    } catch (e) {
+      hata(res, e);
+    }
+  });
+
+  app.post("/api/analiz", girisGerekli, ajax, async (_req, res) => {
+    if (!opts.analizCalistir) return void res.status(501).json({ ok: false, error: "Analiz yapılandırılmamış." });
+    try {
+      const sonuc = await opts.analizCalistir();
+      res.status(sonuc.ok ? 200 : 422).json(sonuc);
+    } catch (e) {
+      hata(res, e);
+    }
+  });
+
+  // Gövde sınırı vb. hatalar JSON döner
+  app.use((err: { status?: number; statusCode?: number }, _req: Request, res: Response, _next: NextFunction) => {
+    const s = err.status ?? err.statusCode ?? 500;
+    res.status(s).json({ error: s === 413 ? "Dosya çok büyük (en çok 100 MB)." : "İstek işlenemedi." });
+  });
 
   return app;
 }
