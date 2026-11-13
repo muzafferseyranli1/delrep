@@ -1,0 +1,24 @@
+{
+  "name": "delrep",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Paket servis raporu: yerel betiğin ürettiği tek dosyalık HTML raporu jetonla alır, şifreyle gösterir",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "start": "tsx src/index.ts",
+    "dev": "tsx watch src/index.ts",
+    "typecheck": "tsc --noEmit",
+    "test": "node --import tsx --test tests/*.test.ts"
+  },
+  "dependencies": {
+    "express": "^4.21.2",
+    "tsx": "^4.19.2"
+  },
+  "devDependencies": {
+    "@types/express": "^4.17.21",
+    "@types/node": "^22.10.0",
+    "typescript": "^5.7.2"
+  }
+}
