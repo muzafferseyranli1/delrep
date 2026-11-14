@@ -34,8 +34,16 @@ function calistir(a: AnalizAyarlari): Promise<AnalizSonucu> {
       .then(() => {
         execFile(
           python,
-          ["-I", path.join(analizDir, "calistir.py"), faturalar, cikti, gecici],
-          { timeout: ZAMAN_ASIMI_MS, maxBuffer: 5 * 1024 * 1024, env: { PATH: process.env.PATH ?? "", PYTHONIOENCODING: "utf-8" } },
+          // -I ortam değişkenlerini (PYTHONIOENCODING dahil) yok sayar; çıktı kodlaması -X utf8 ile sabitlenir
+          ["-I", "-X", "utf8", "-W", "ignore", path.join(analizDir, "calistir.py"), faturalar, cikti, gecici],
+          {
+            timeout: ZAMAN_ASIMI_MS,
+            maxBuffer: 5 * 1024 * 1024,
+            env: {
+              PATH: process.env.PATH ?? "",
+              ...(process.env.ANALIZ_BASLANGIC ? { ANALIZ_BASLANGIC: process.env.ANALIZ_BASLANGIC } : {}),
+            },
+          },
           (err, stdout, stderr) => {
             const sonSatir = (s: string) => s.trim().split(/\r?\n/).filter(Boolean).pop() ?? "";
             if (err) {

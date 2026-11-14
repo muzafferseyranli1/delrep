@@ -5,3 +5,6 @@ data/
 !.env.example
 *.tmp
 *.log
+docs/
+*.rar
+__pycache__/

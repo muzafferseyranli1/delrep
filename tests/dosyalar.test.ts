@@ -1,12 +1,12 @@
 import assert from "node:assert/strict";
-import { mkdtemp, readdir, rm } from "node:fs/promises";
+import { mkdtemp, readdir, rm, writeFile } from "node:fs/promises";
 import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { test } from "node:test";
 import { zipSync } from "fflate";
 import { createApp } from "../src/app";
-import { DosyaHatasi, guvenliAd, kaydet, listele, sil, taninir } from "../src/dosyalar";
+import { DosyaHatasi, guvenliAd, kaydet, listele, sil } from "../src/dosyalar";
 
 const PK = Buffer.from([0x50, 0x4b, 3, 4, 1, 2, 3, 4]);
 const TOKEN = "t".repeat(40);
@@ -24,42 +24,61 @@ test("guvenliAd: yol ayırıcıları atılır, tehlikeli adlar reddedilir", () =
   assert.equal(guvenliAd("x".repeat(200) + ".xlsx"), undefined);
 });
 
-test("taninir: yalnız Trendyol/Getir fatura adları", () => {
-  assert.equal(taninir("prod_2026_1_SaticiFatura_9_08.10.2026-10.00.xlsx"), true);
-  assert.equal(taninir("PayWithOnDelivery_Komisyon_Fatura_Detayi_v2.xlsx"), true);
-  assert.equal(taninir("yemeksepeti_ekim.xlsx"), false);
-});
+const metin = (s: string) => new Uint8Array(Buffer.from(s, "utf8"));
 
-test("kaydet: xlsx, zip içi xlsx, yanlış tür ve bozuk içerik", async () => {
+test("kaydet: xlsx, csv, zip içi dosyalar, yanlış tür ve bozuk içerik", async () => {
   const dir = await mkdtemp(path.join(tmpdir(), "delrep-dosya-"));
   try {
     assert.deepEqual((await kaydet(dir, "A_SaticiFatura_1.XLSX", PK)).kaydedilen, ["A_SaticiFatura_1.xlsx"]); // uzantı küçülür
+    assert.deepEqual((await kaydet(dir, "siparisler.CSV", Buffer.from("Sipariş No,Ara Toplam\n1,\"1.000,00\"\n"))).kaydedilen, ["siparisler.csv"]);
     await assert.rejects(kaydet(dir, "a.txt", PK), DosyaHatasi);
     await assert.rejects(kaydet(dir, "a.xlsx", Buffer.from("merhaba dunya")), DosyaHatasi);
+    await assert.rejects(kaydet(dir, "a.csv", Buffer.from([0x50, 0x4b, 0, 0, 1])), DosyaHatasi); // ikili içerik csv değildir
+    await assert.rejects(kaydet(dir, "a.csv", Buffer.alloc(0)), DosyaHatasi);
     await assert.rejects(kaydet(dir, "a.zip", Buffer.from("PK yok")), DosyaHatasi);
 
     const zip = Buffer.from(
       zipSync({
-        "ekim/YS_1.xlsx": new Uint8Array(PK),
-        "kasim/YS_1.xlsx": new Uint8Array(PK), // aynı ad, farklı klasör: biri ötekini ezmemeli
-        "__MACOSX/._YS_1.xlsx": new Uint8Array(PK),
+        "ekim/YS_1.csv": metin("a,b\n1,2\n"),
+        "kasim/YS_1.csv": metin("a,b\n3,4\n"), // aynı ad, farklı içerik: biri ötekini ezmemeli
+        "kasim/fatura.xlsx": new Uint8Array(PK), // daha önce yüklenen dosyanın aynısı
+        "__MACOSX/._YS_1.csv": metin("x"),
         "okubeni.txt": new Uint8Array([1, 2, 3]),
       }),
     );
     const r = await kaydet(dir, "yemeksepeti.zip", zip);
-    assert.equal(r.kaydedilen.length, 2);
-    assert.equal(new Set(r.kaydedilen).size, 2);
+    assert.deepEqual(r.kaydedilen.sort(), ["YS_1 (2).csv", "YS_1.csv"]);
+    assert.deepEqual(r.zatenVar, ["A_SaticiFatura_1.xlsx"]);
     assert.equal(r.atlanan, 1);
+
+    // aynı dosya ikinci kez: saklanmaz; aynı ad farklı içerik: sayı eklenir
+    assert.deepEqual(await kaydet(dir, "siparisler.csv", Buffer.from("Sipariş No,Ara Toplam\n1,\"1.000,00\"\n")),
+      { kaydedilen: [], zatenVar: ["siparisler.csv"], atlanan: 0 });
+    assert.deepEqual((await kaydet(dir, "siparisler.csv", Buffer.from("Sipariş No\n2\n"))).kaydedilen, ["siparisler (2).csv"]);
 
     await assert.rejects(kaydet(dir, "bos.zip", Buffer.from(zipSync({ "a.txt": new Uint8Array([1, 2, 3, 4, 5]) }))), DosyaHatasi);
 
     const liste = await listele(dir);
-    assert.equal(liste.length, 3);
-    assert.equal(liste.find((f) => f.ad === "A_SaticiFatura_1.xlsx")?.taninan, true);
+    assert.equal(liste.length, 5);
+    assert.equal(liste[0].durum, null); // analiz özeti yoksa tür/durum bilinmez
     assert.equal((await readdir(dir)).some((a) => a.endsWith(".tmp")), false);
 
+    const ozetYolu = path.join(dir, "..", `${path.basename(dir)}-ozet.json`);
+    await writeFile(ozetYolu, JSON.stringify({ dosyalar: [
+      { ad: "siparisler.csv", tur: "Yemeksepeti sipariş listesi", satir: 1, durum: "okundu" },
+      { ad: "YS_1.csv", tur: "", satir: 0, durum: "tanınmadı (sütunlar bilinen bir rapora uymuyor)" },
+    ] }));
+    try {
+      const l2 = await listele(dir, ozetYolu);
+      assert.deepEqual(l2.find((f) => f.ad === "siparisler.csv"), { ...l2.find((f) => f.ad === "siparisler.csv")!, tur: "Yemeksepeti sipariş listesi", durum: "okundu" });
+      assert.equal(l2.find((f) => f.ad === "YS_1.csv")?.tur, null);
+      assert.match(l2.find((f) => f.ad === "YS_1.csv")?.durum ?? "", /tanınmadı/);
+    } finally {
+      await rm(ozetYolu, { force: true });
+    }
+
     await sil(dir, "A_SaticiFatura_1.xlsx");
-    assert.equal((await listele(dir)).length, 2);
+    assert.equal((await listele(dir)).length, 4);
     await assert.rejects(sil(dir, "../x"), DosyaHatasi);
   } finally {
     await rm(dir, { recursive: true, force: true });
@@ -92,7 +111,7 @@ test("API: kimliksiz 401, başlıksız 400, yükle-listele-sil-analiz akışı",
     assert.equal((await fetch(`${s.base}/api/dosyalar`)).status, 401);
     const liste = await (await fetch(`${s.base}/api/dosyalar`, { headers: { Authorization: basic } })).json();
     assert.equal(liste.dosyalar.length, 1);
-    assert.equal(liste.dosyalar[0].taninan, true);
+    assert.equal(liste.dosyalar[0].durum, null); // henüz analiz edilmedi
 
     const sayfa = await fetch(`${s.base}/yukle`, { headers: { Authorization: basic } });
     assert.equal(sayfa.status, 200);

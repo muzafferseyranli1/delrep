@@ -1,71 +1,68 @@
 """
-Sunucu için analiz çalıştırıcı.
+Paket servis analizini çalıştırır ve tek dosyalık HTML rapor yazar.
 
-Kullanım: python3 calistir.py <fatura_klasoru> <cikti_klasoru> <rapor_html_yolu>
+Kullanım: python3 calistir.py <girdi_klasoru> <cikti_klasoru> <rapor_html_yolu>
 
-fatura_analiz.py (referans uygulama) DEĞİŞTİRİLMEDEN kullanılır; bu dosya yalnızca onu çağırır:
- - dönemleri sabit yazmak yerine verinin kapsadığı tarih aralığından haftalık (pazartesi-pazar) üretir
- - çıkan CSV'lerden rapor.py ile tek dosyalık HTML rapor yazar
+Girdi klasörü (alt klasörler ve zip arşivleri dahil) taranır; Trendyol Go ve Yemeksepeti raporları
+dosya adından değil içeriğinden tanınır. Analizin başlangıç günü ANALIZ_BASLANGIC ortam değişkeniyle
+(YYYY-AA-GG) değiştirilebilir.
 
-Çıkış kodları: 0 başarılı, 3 analiz edilecek fatura yok, 1 hata (son satır stderr'e yazılır).
+Çıkış kodları: 0 başarılı, 3 analiz edilecek veri yok, 1 hata (son satır stderr'e yazılır).
 """
-import glob
+import json
 import os
 import sys
-from datetime import date, timedelta
+import warnings
+from datetime import date
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-import fatura_analiz as fa  # noqa: E402
+import hesap  # noqa: E402
+import okuma  # noqa: E402
 import rapor  # noqa: E402
 
-AY = ["Oca", "Şub", "Mar", "Nis", "May", "Haz", "Tem", "Ağu", "Eyl", "Eki", "Kas", "Ara"]
-ONLINE_DESEN = "*SaticiFatura*.xlsx"
-KAPIDA_DESEN = "*PayWithOnDelivery*.xlsx"
+VARSAYILAN_BASLANGIC = date(2026, 9, 1)
 
 
-def etiket(bas: date, bit: date) -> str:
-    if bas == bit:
-        return f"{bas.day} {AY[bas.month - 1]}"
-    if bas.month == bit.month:
-        return f"{bas.day}–{bit.day} {AY[bas.month - 1]}"
-    return f"{bas.day} {AY[bas.month - 1]} – {bit.day} {AY[bit.month - 1]}"
+def baslangic() -> date:
+    s = os.environ.get("ANALIZ_BASLANGIC", "").strip()
+    return date.fromisoformat(s) if s else VARSAYILAN_BASLANGIC
 
 
-def haftalar(ilk: date, son: date):
-    """Verinin ilk ve son gününe kırpılmış pazartesi-pazar haftaları: (etiket, 'YYYY-MM-DD', 'YYYY-MM-DD')."""
-    satirlar = []
-    d = ilk
-    while d <= son:
-        bit = min(d + timedelta(days=6 - d.weekday()), son)
-        satirlar.append((etiket(d, bit), d.isoformat(), bit.isoformat()))
-        d = bit + timedelta(days=1)
-    return satirlar
-
-
-def main(faturalar: str, cikti: str, rapor_yolu: str) -> int:
-    taninan = sorted(glob.glob(os.path.join(faturalar, ONLINE_DESEN)) + glob.glob(os.path.join(faturalar, KAPIDA_DESEN)))
-    if not taninan:
-        print("Analiz edilecek Trendyol Go / GetirYemek faturası yok (dosya adında SaticiFatura veya PayWithOnDelivery geçmeli).")
+def main(girdi: str, cikti: str, rapor_yolu: str) -> int:
+    warnings.filterwarnings("ignore", category=UserWarning)  # openpyxl'in stil uyarıları
+    g = okuma.oku(girdi)
+    if not any(t in g.tablolar for t in ("ty_online", "ty_kapida", "ys_siparis")):
+        print("Analiz edilecek sipariş verisi yok (Trendyol komisyon fatura detayı ya da Yemeksepeti sipariş listesi gerekli).")
         return 3
-
-    online, kapida = fa.yukle(faturalar)
-    siparisler = fa.siparis_tablosu(online, kapida)
-    ilk, son = siparisler.t.min().date(), siparisler.t.max().date()
-    fa.analiz(faturalar, cikti, haftalar(ilk, son))
-
-    tum = set(glob.glob(os.path.join(faturalar, "*.xlsx")))
-    taninmayan = sorted(os.path.basename(f) for f in tum - set(taninan))
-    html = rapor.uret(cikti, dosya_sayisi=len(taninan), taninmayan=taninmayan, aralik=(ilk, son))
+    try:
+        a = hesap.kur(g, baslangic())
+    except SystemExit as e:
+        if e.code == 3:
+            print("Verinin kapsadığı tam bir fatura dönemi yok.")
+            return 3
+        raise
+    if a.son < a.bas:
+        print(f"Analiz başlangıcından ({a.bas:%d.%m.%Y}) sonra tamamlanmış dönem yok.")
+        return 3
+    html = rapor.uret(a, g)
+    os.makedirs(cikti, exist_ok=True)
+    ozet = {"bas": a.bas.isoformat(), "son": a.son.isoformat(), "magazalar": a.magazalar,
+            "uyarilar": [{"magaza": u.magaza, "seviye": u.seviye, "metin": u.metin} for u in a.uyarilar],
+            "dosyalar": [{"ad": k.ad, "tur": k.tur, "satir": k.satir, "durum": k.durum} for k in g.kayitlar]}
+    with open(os.path.join(cikti, "ozet.json"), "w", encoding="utf-8") as f:
+        json.dump(ozet, f, ensure_ascii=False, indent=1)
     with open(rapor_yolu, "w", encoding="utf-8") as f:
         f.write(html)
-    print(f"{len(siparisler)} sipariş, {ilk:%d.%m.%Y}–{son:%d.%m.%Y}, {len(taninan)} fatura dosyası")
+    okunan = sum(k.durum == "okundu" for k in g.kayitlar)
+    hata = sum(u.seviye == "hata" for u in a.uyarilar)
+    print(f"{a.bas:%d.%m.%Y}–{a.son:%d.%m.%Y}, {len(a.magazalar)} mağaza, {okunan} dosya okundu, {hata} kontrol hatası")
     return 0
 
 
 if __name__ == "__main__":
     if len(sys.argv) != 4:
-        print("Kullanım: calistir.py <fatura_klasoru> <cikti_klasoru> <rapor_html_yolu>", file=sys.stderr)
+        print("Kullanım: calistir.py <girdi_klasoru> <cikti_klasoru> <rapor_html_yolu>", file=sys.stderr)
         sys.exit(2)
     try:
         sys.exit(main(*sys.argv[1:4]))

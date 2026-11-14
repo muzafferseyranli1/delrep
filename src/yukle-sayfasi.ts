@@ -25,12 +25,18 @@ th{color:var(--soluk);font-weight:600}td.sag,th.sag{text-align:right;white-space
 .rozet{font-size:12px;border:1px solid var(--cizgi);border-radius:999px;padding:1px 8px;color:var(--soluk);white-space:nowrap}
 .satir{display:flex;gap:10px;align-items:center;flex-wrap:wrap}.bosluk{flex:1}
 </style></head><body><main>
-<h1>Fatura yükle</h1>
-<p class="alt">Trendyol Go / GetirYemek faturalarını (.xlsx) ya da Yemeksepeti'nin verdiği .zip dosyasını yükleyin. Dosyalar birikir, yüklemeden sonra rapor yeniden hesaplanır. <a href="/">Raporu aç</a></p>
+<h1>Rapor dosyalarını yükle</h1>
+<p class="alt">Trendyol Go ve Yemeksepeti panellerinden indirdiğiniz dosyaları yükleyin (.xlsx, .csv ya da bunları içeren .zip). Dosya adının önemi yok: hangi rapor olduğu içeriğinden anlaşılır. Aynı dosyayı ya da tarihleri çakışan dosyaları yüklemek sorun değil; aynı kayıt için en son yüklenen kullanılır. Yüklemeden sonra rapor yeniden hesaplanır. <a href="/">Raporu aç</a></p>
+
+<details class="kart"><summary><strong>Her hafta hangi dosyalar?</strong></summary>
+<p><b>Trendyol Go</b> (her mağaza için): komisyon fatura detayı (yeni kesilen haftalık fatura), kapıda ödeme komisyon detayları (yeni kesilenler), fatura listesi, reklam raporu, değerlendirmeler.</p>
+<p><b>Yemeksepeti</b>: sipariş listesi, fatura özeti (her mağaza için), günlük performans, değerlendirmeler; isteğe bağlı ürün satışları.</p>
+<p class="alt" style="margin:0">Trendyol haftalık faturası haftanın bitiminden sonraki gün kesilir; o fatura gelmeden son hafta rapora girmez.</p>
+</details>
 
 <div class="kart">
-  <div id="birak" tabindex="0" role="button">Dosyaları buraya bırakın ya da seçmek için tıklayın<br><small style="color:var(--soluk)">.xlsx ve .zip, birden çok dosya seçilebilir</small></div>
-  <input id="sec" type="file" multiple accept=".xlsx,.zip" hidden>
+  <div id="birak" tabindex="0" role="button">Dosyaları buraya bırakın ya da seçmek için tıklayın<br><small style="color:var(--soluk)">.xlsx, .csv ve .zip, birden çok dosya seçilebilir</small></div>
+  <input id="sec" type="file" multiple accept=".xlsx,.csv,.zip" hidden>
   <ul id="durum" aria-live="polite"></ul>
 </div>
 
@@ -59,7 +65,11 @@ th{color:var(--soluk);font-weight:600}td.sag,th.sag{text-align:right;white-space
     d.forEach(function(f){
       var tr=document.createElement("tr");
       var a=document.createElement("td");a.textContent=f.ad;
-      if(!f.taninan){var z=document.createElement("span");z.className="rozet";z.style.marginLeft="8px";z.textContent="analize girmez";a.appendChild(z)}
+      var z=document.createElement("span");z.className="rozet";z.style.marginLeft="8px";
+      if(!f.durum){z.textContent="henüz analiz edilmedi"}
+      else if(f.durum==="okundu"){z.textContent=f.tur||"okundu";z.classList.add("iyi")}
+      else{z.textContent=(f.tur?f.tur+": ":"")+f.durum;if(/tanınmadı|okunamadı/.test(f.durum))z.classList.add("kotu")}
+      a.appendChild(document.createElement("br"));a.appendChild(z);z.style.marginLeft="0"
       var b=document.createElement("td");b.className="sag";b.textContent=boyut(f.bayt);
       var t=document.createElement("td");t.textContent=tarih(f.tarih);
       var s=document.createElement("td");s.className="sag";
@@ -72,8 +82,8 @@ th{color:var(--soluk);font-weight:600}td.sag,th.sag{text-align:right;white-space
       };
       s.appendChild(btn);tr.append(a,b,t,s);g.appendChild(tr);
     });
-    var taninan=d.filter(function(f){return f.taninan}).length;
-    $("ozet").textContent=d.length+" dosya, "+taninan+" tanınan";
+    var okunan=d.filter(function(f){return f.durum==="okundu"}).length;
+    $("ozet").textContent=d.length+" dosya, "+okunan+" tanesi analizde kullanıldı";
     $("bos").hidden=d.length>0;
   }
 
@@ -97,7 +107,10 @@ th{color:var(--soluk);font-weight:600}td.sag,th.sag{text-align:right;white-space
       try{
         var r=await fetch("/api/dosyalar/"+encodeURIComponent(f.name),{method:"PUT",headers:Object.assign({"Content-Type":"application/octet-stream"},H),body:f});
         var v=await json(r);
-        if(r.ok){basarili++;var n=(v.kaydedilen||[]).length;li.textContent=f.name+": "+n+" dosya kaydedildi"+(v.atlanan?" ("+v.atlanan+" dosya .xlsx olmadığı için atlandı)":"");li.className=v.atlanan?"uyari":"iyi"}
+        if(r.ok){
+          var n=(v.kaydedilen||[]).length,zv=(v.zatenVar||[]).length;if(n)basarili++;
+          var parca=[];if(n)parca.push(n+" dosya kaydedildi");if(zv)parca.push(zv+" dosya zaten yüklüydü");if(v.atlanan)parca.push(v.atlanan+" dosya .xlsx/.csv olmadığı için atlandı");
+          li.textContent=f.name+": "+parca.join(", ");li.className=v.atlanan?"uyari":"iyi"}
         else{li.textContent=f.name+": "+(v.error||"yüklenemedi");li.className="kotu"}
       }catch(e){li.textContent=f.name+": bağlantı hatası";li.className="kotu"}
     }

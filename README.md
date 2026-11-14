@@ -2,11 +2,17 @@
 
 Paket servis platformlarının fatura Excel'lerini web sayfasından yüklersiniz; sunucu faturaları biriktirir, analiz eder ve raporu şifreyle gösterir. Hangi bilgisayardan girerseniz girin aynı veriyi görürsünüz.
 
-**Akış:** `/yukle` sayfasında `.xlsx` (Trendyol Go / GetirYemek) ya da `.zip` (Yemeksepeti) dosyaları yüklenir → `/data/faturalar` altında birikir (ZIP sunucuda açılır, içindeki `.xlsx` dosyaları saklanır) → `analiz/fatura_analiz.py` (referans uygulama, değiştirilmeden) tüm dosyaları baştan işler → `analiz/rapor.py` HTML raporu üretir → `/` adresinde görünür. Aynı fatura iki kez yüklenirse `Kayıt No` ile tekrarlar ayıklanır.
+**Akış:** `/yukle` sayfasında dosyalar yüklenir → `/data/faturalar` altında birikir → `analiz/calistir.py` hepsini baştan işler → `/` adresinde HTML rapor görünür.
 
-> **Durum:** `analiz/` altındaki rapor ve çalıştırıcı yer tutucudur; gerçek, çok daha kapsamlı analiz motoru (iki mağaza, Yemeksepeti, reklam, mutabakat) henüz taşınmadı. Ayrıntı ve yapılacaklar: [DEVIR_NOTU_DELREP.md](DEVIR_NOTU_DELREP.md).
+**Analiz motoru (`analiz/`):** `okuma.py` dosyaları adından değil içeriğinden tanır (zip içleri dahil), `hesap.py` beş amacı hesaplar, `rapor.py` tek dosyalık HTML üretir. Beş amaç: fatura kontrolü, trend, müşteri algısı, kampanya etkisi, reklam etkisi. Dönemler platformların fatura dönemleridir (ayın 1–7, 8–14, 15–21, 22–28, 29–son). Mağaza dosya içeriğinden bulunur; aynı kayıt birden çok dosyada varsa en yeni dosyadaki kalır. Analizin başlangıç günü `ANALIZ_BASLANGIC` ortam değişkeniyle değiştirilebilir.
 
-**Şu an analize giren:** adında `SaticiFatura` veya `PayWithOnDelivery` geçen Trendyol Go / GetirYemek `.xlsx` dosyaları. Diğer dosyalar (Yemeksepeti dahil) saklanır, listede "analize girmez" etiketi görünür ve raporda uyarı çıkar. Yemeksepeti okuyucusu örnek dosya gelince eklenecek.
+Tanınan raporlar:
+- **Trendyol Go:** komisyon fatura detayı (`SaticiFatura`), kapıda ödeme detayı (`PayWithOnDelivery`), fatura listesi (`Faturalar_`), reklam raporu (`Reklam-`), değerlendirmeler.
+- **Yemeksepeti (CSV):** sipariş listesi, fatura özeti, günlük performans, ürün satışları, değerlendirmeler.
+
+Yerelde çalıştırma: `python3 -I analiz/calistir.py <girdi_klasoru> <cikti_klasoru> <rapor.html>`
+
+> **Eksik:** web yükleme (`src/dosyalar.ts`) henüz yalnız `.xlsx` ve `.zip` kabul ediyor ve yalnız `SaticiFatura`/`PayWithOnDelivery` dosyalarını "tanınan" sayıyor. Yemeksepeti'nin `.csv` dosyaları için güncellenmeli.
 
 | Uç | Koruma | Ne yapar |
 |---|---|---|

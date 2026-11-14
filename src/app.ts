@@ -8,7 +8,8 @@ import { YUKLE_CSP, YUKLE_HTML } from "./yukle-sayfasi";
 
 /**
  * Paket servis raporu.
- * Rapor yerelde üretilir (fatura_analiz.py + rapor.py) ve tek dosyalık HTML olarak buraya yüklenir:
+ * Rapor iki yoldan gelir: /yukle sayfasından yüklenen Trendyol Go ve Yemeksepeti dosyalarından sunucuda üretilir
+ * (analiz/calistir.py), ya da yerelde üretilip tek dosyalık HTML olarak buraya yüklenir:
  *   PUT /api/paketrapor   Authorization: Bearer <UPLOAD_TOKEN>
  * Sayfayı görmek için tarayıcı kullanıcı adı/şifre sorar (HTTP Basic, yalnızca HTTPS arkasında kullanın):
  *   GET /   (ya da /paketrapor)
@@ -163,7 +164,7 @@ export function createApp(opts: AppOptions): Express {
   app.get("/api/dosyalar", girisGerekli, async (_req, res) => {
     try {
       res.setHeader("Cache-Control", "no-store");
-      res.json({ dosyalar: await listele(faturaDir) });
+      res.json({ dosyalar: await listele(faturaDir, path.join(opts.dataDir, "analiz-cikti", "ozet.json")) });
     } catch (e) {
       hata(res, e);
     }
