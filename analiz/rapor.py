@@ -591,10 +591,14 @@ def ay_ayrintisi_html(a, m) -> str:
     k = d.get("kampanya")
     if k is not None and not k.empty:
         k = k.sort_values(["platform", "maliyet"], ascending=[True, False])
-        satir = [[r.platform, r.ad, sayi(r.siparis), tl(r.maliyet) if r.maliyet else "—", tl(oran(r.maliyet, r.siparis)) if r.maliyet else "—",
+        satir = [[r.platform, r.ad, sayi(r.siparis), tl(r.satis), tl(r.maliyet) if r.maliyet else "—",
+                  yuzde(oran(r.maliyet, r.satis)) if r.maliyet else "—", tl(oran(r.maliyet, r.siparis)) if r.maliyet else "—",
                   f"{gun(r.ilk)} – {gun(r.son)}"] for r in k.itertuples()]
-        h.append("<h4>Bu ayın kampanyaları</h4>" + tablo(["Platform", "Kampanya", "Sipariş", "Toplam indirim", "Sipariş başı", "Kullanım"],
-                                                         satir, sag=[2, 3, 4]))
+        h.append("<h4>Bu ayın kampanyaları</h4><p class='not'>Kampanyalı satış: kampanyanın uygulandığı siparişlerin brüt tutarı "
+                 "(menü fiyatıyla, indirimden önce). Maliyet oranı: restoranın karşıladığı indirimin bu satışa oranı. Bir siparişte iki "
+                 "kampanya varsa (ör. %15 indirim ve kupon) sipariş ikisinin satışına da girer.</p>"
+                 + tablo(["Platform", "Kampanya", "Sipariş", "Kampanyalı satış", "Toplam indirim", "Maliyet oranı", "Sipariş başı", "Kullanım"],
+                         satir, sag=[2, 3, 4, 5, 6]))
     return "".join(h)
 
 
@@ -653,14 +657,17 @@ def bolum_kampanya(a, m) -> str:
         return "<p>Analiz döneminde restoranın karşıladığı indirim ya da kupon yok.</p>"
     h = ["<p class='not'>Kampanya: restoranın karşıladığı indirim ve kuponlar. Trendyol'da kampanya adı indirim satırından okunuyor. "
          "Yemeksepeti kampanya adı vermediği için indirim oranına ve kupon tutarına göre ayrılıp ilk kullanım sırasıyla numaralandı. "
+         "Kampanyalı satış: kampanyanın uygulandığı siparişlerin brüt tutarı (menü fiyatıyla, indirimden önce); maliyet oranı: "
+         "restoranın karşıladığı indirimin bu satışa oranı. "
          "“Günlük sipariş” sütunları o platformdaki bütün siparişlerin kampanyadan önce, kampanya süresince ve sonra günlük ortalaması "
          "(7 günden kısa aralık hesaplanmadı). Aynı dönemde başka kampanya ya da reklam değiştiyse fark yalnız bu kampanyaya ait değildir.</p>"]
     for p in (TY, YS):
         x = k[k["platform"] == p]
         if x.empty:
             continue
-        satir = [[r.ad, f"{gun(r.ilk)} – {gun(r.son)}", sayi(r.aktif_gun), sayi(r.siparis), yuzde(r.pay, 0), tl(r.maliyet),
-                  tl(r.siparis_basi), tl(r.sepet_kamp), tl(r.sepet_diger), sayi(r.once, 1), sayi(r.sira, 1), sayi(r.sonra, 1)]
+        satir = [[r.ad, f"{gun(r.ilk)} – {gun(r.son)}", sayi(r.aktif_gun), sayi(r.siparis), yuzde(r.pay, 0), tl(r.satis),
+                  tl(r.maliyet) if r.maliyet else "—", yuzde(r.maliyet_orani) if r.maliyet else "—", tl(r.siparis_basi) if r.maliyet else "—",
+                  tl(r.sepet_kamp), tl(r.sepet_diger), sayi(r.once, 1), sayi(r.sira, 1), sayi(r.sonra, 1)]
                  for r in x.sort_values("maliyet", ascending=False).itertuples()]
         h.append(f"<h3>{e(p)}</h3>")
         enb = x.sort_values("maliyet", ascending=False).iloc[0]
@@ -671,9 +678,10 @@ def bolum_kampanya(a, m) -> str:
             if not _bos(enb.once) and not _bos(enb.sira):
                 cumle += f" Platformdaki günlük sipariş kampanyadan önce {sayi(enb.once, 1)}, kampanya süresince {sayi(enb.sira, 1)}."
             h.append(f"<p>{e(cumle)}</p>")
-        h.append(tablo(["Kampanya", "Kullanım", "Aktif gün", "Sipariş", "Kampanyalı pay", "Maliyet", "Sipariş başı", "Sepet (kampanyalı)",
-                        "Sepet (diğer)", "Günlük sipariş: önce", "sırasında", "sonra"], satir, sag=list(range(2, 12)),
-                       alt=["Toplam", "", "", "", "", tl(x["maliyet"].sum()), "", "", "", "", "", ""]))
+        h.append(tablo(["Kampanya", "Kullanım", "Aktif gün", "Sipariş", "Kampanyalı pay", "Kampanyalı satış", "Maliyet", "Maliyet oranı",
+                        "Sipariş başı", "Sepet (kampanyalı)", "Sepet (diğer)", "Günlük sipariş: önce", "sırasında", "sonra"], satir,
+                       sag=list(range(2, 14)),
+                       alt=["Toplam", "", "", "", "", "", tl(x["maliyet"].sum()), "", "", "", "", "", "", ""]))
         pm = x["platform_maliyet"].sum()
         if pm > 0:
             h.append(f"<p class='not'>Platformun kendi karşıladığı indirim ve kuponlar (restorana maliyeti yok): {tl(pm)}.</p>")

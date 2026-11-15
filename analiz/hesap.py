@@ -842,7 +842,7 @@ def kampanyalar(a: Analiz, m: str) -> pd.DataFrame:
         sira = gunluk(ilk, son)
         sonra = gunluk(son + timedelta(days=1), a.son)
         rows.append({"platform": p, "ad": ad, "ilk": ilk, "son": son, "aktif_gun": x["gun"].nunique(), "siparis": siparis,
-                     "pay": siparis / len(ic) if len(ic) else np.nan, "maliyet": maliyet,
+                     "pay": siparis / len(ic) if len(ic) else np.nan, "maliyet": maliyet, "satis": ciro,
                      "platform_maliyet": x["platform_maliyet"].sum(), "siparis_basi": maliyet / siparis if siparis else np.nan,
                      "sepet_kamp": ciro / siparis if siparis else np.nan,
                      "sepet_diger": diger["brut"].mean() if len(diger) else np.nan,
@@ -1096,6 +1096,9 @@ def ay_ayrintisi(a: Analiz, m: str, bas: date, son: date) -> dict:
                                                                     platform_maliyet=("platform_maliyet", "sum"),
                                                                     ilk=("gun", "min"), son=("gun", "max"))
         kk["ad"] = [harita.get((p, n), n) for p, n in zip(kk["platform"], kk["kampanya"])]
+        # kampanyalı satış: kampanyanın uygulandığı siparişlerin brüt tutarı (her sipariş bir kez)
+        satis = k.drop_duplicates(["platform", "kampanya", "siparis"]).groupby(["platform", "kampanya"])["brut"].sum()
+        kk["satis"] = [satis.get((p, n), 0.0) for p, n in zip(kk["platform"], kk["kampanya"])]
         sonuc["kampanya"] = kk
     return sonuc
 
