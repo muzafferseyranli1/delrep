@@ -123,6 +123,8 @@ class Analiz:
     ys_deg: pd.DataFrame
     kapsam: dict
     uyarilar: list = field(default_factory=list)
+    urun: pd.DataFrame = field(default_factory=pd.DataFrame)  # platform, magaza, gun, urun, adet, ciro
+    magaza_no: dict = field(default_factory=dict)  # mağaza adı -> {platform: numara}
 
 
 BOS = pd.DataFrame()
@@ -398,11 +400,16 @@ def _reklam_kampanyalari(r: pd.DataFrame, f: pd.DataFrame) -> tuple[pd.DataFrame
         if x.fatura == 0:
             if x.baslangic is not None and x.baslangic < ilk.to_pydatetime() - timedelta(minutes=5):
                 return "Fatura listesi bu tarihi kapsamıyor"
-            return "Faturası bulunamadı" if x.harcama > 0 else "Harcama yok"
+            # Bazı kampanyalarda reklam bedelinin bir bölümünü ya da tamamını Trendyol karşılıyor (kullanıcı doğruladı)
+            return "Tamamını Trendyol karşıladı" if x.harcama > 0 else "Harcama yok"
         if abs(x.fark) < 1:
             return "Tutuyor"
-        return "Fatura harcamadan fazla" if x.fark > 0 else "Harcama faturadan fazla"
+        return "Fatura harcamadan fazla" if x.fark > 0 else "Bir bölümünü Trendyol karşıladı"
     k["durum"] = k.apply(durum, axis=1)
+    kapsar = ~k["durum"].isin(["Fatura listesi yok", "Fatura listesi bu tarihi kapsamıyor"])
+    k["trendyol_payi"] = np.where(kapsar, (k["harcama"] - k["fatura"]).clip(lower=0), 0.0).round(2)
+    # Restoranın payı: kesilen fatura; fatura listesi kampanyayı kapsamıyorsa harcamanın tamamı varsayılır
+    k["restoran_payi"] = np.where(kapsar, k["fatura"], k["harcama"])
     return k.sort_values(["magaza", "ilk"]), rf
 
 
@@ -546,10 +553,35 @@ def kur(g: Girdi, baslangic: date) -> Analiz:
         y["neden"] = neden
         ys_sapma = y[y["neden"] != ""]
 
+    # ---- ürünler: Trendyol'da her satış satırı bir adet; Yemeksepeti'nde ürün satışları raporu
+    urunler = []
+    if not ty_s.empty:
+        u = _en_yeni(ty_s, ["tur", "kayit"])
+        u = u[u["tip"] == "Satış"]
+        urunler.append(pd.DataFrame({"platform": TY, "magaza": u["magaza"], "gun": u["zaman"].dt.date,
+                                     "urun": u["urun"].map(_tirnak), "adet": 1.0, "ciro": u["tutar"]}))
+    yu = g.tablolar.get("ys_urun")
+    if yu is not None:
+        # Aynı gün aynı ürün farklı fiyatlarla birden çok satır olabilir; satır anahtarı yok. Bu yüzden her mağaza-gün
+        # için yalnız o günü içeren en yeni dosyanın satırları alınır (çakışan dosyalar iki kez sayılmaz).
+        en_yeni = yu.groupby(["Satıcı Kimliği", "Tarih"])["_zaman"].transform("max")
+        yu = yu[yu["_zaman"] == en_yeni]
+        yu = yu[~yu.duplicated([c for c in yu.columns if c not in ("_dosya", "_sha")])]  # aynı zamanlı birebir kopyalar
+        urunler.append(pd.DataFrame({"platform": YS, "magaza": yu["Satıcı Kimliği"].astype(str).str.strip().map(ys_adlar),
+                                     "gun": tarih_iso(yu["Tarih"]).dt.date, "urun": yu["Menü öğesi adı"].map(_tirnak),
+                                     "adet": sayilar(yu["Adet"]), "ciro": sayilar(yu["Gelir"])}).dropna(subset=["magaza", "gun"]))
+    urun = pd.concat(urunler, ignore_index=True) if urunler else BOS
+
+    numaralar: dict = {}
+    for no, ad in magaza_adlari.items():
+        numaralar.setdefault(ad, {})[TY] = no
+    for no, ad in ys_adlar.items():
+        numaralar.setdefault(ad, {})[YS] = no
+
     a = Analiz(bas=bas, son=son, donemler=dlist, magazalar=magazalar, siparis=sip, kampanya=kamp,
                ty_dosya=ty_dosya, ty_satir_sapma=ty_sapma, ty_fatura=ty_f, ty_reklam=ty_r, ty_reklam_kampanya=ty_rk,
                ty_deg=ty_d, ys_fatura=ys_f, ys_sapma=ys_sapma, ys_perf=ys_p, ys_deg=ys_d,
-               kapsam={"uclar": uclar, "ty_satir": len(ty_s)}, uyarilar=uyarilar)
+               kapsam={"uclar": uclar, "ty_satir": len(ty_s)}, uyarilar=uyarilar, urun=urun, magaza_no=numaralar)
     _uyarilari_topla(a)
     return a
 
@@ -576,11 +608,28 @@ def ty_reklam_faturasi(a: Analiz, m: str) -> pd.DataFrame:
     return x
 
 
+def ty_reklam_gunluk(a: Analiz, m: str) -> pd.DataFrame:
+    """Gün başına Trendyol reklam harcaması ve restoranın payı (maliyet). Restoranın payı, kampanyaya kesilen Reklam Bedeli
+    faturalarının kampanyanın harcama günlerine harcamayla orantılı dağıtılmasıyla bulunur: bazı kampanyalarda bedelin bir
+    bölümünü ya da tamamını Trendyol karşılıyor. Günlük bütçeli kampanyada harcanmayan bütçe de restoranın payına girer."""
+    if a.ty_reklam.empty:
+        return pd.DataFrame(columns=["harcama", "maliyet"])
+    r = a.ty_reklam[a.ty_reklam["magaza"] == m]
+    if r.empty:
+        return pd.DataFrame(columns=["harcama", "maliyet"])
+    rk = a.ty_reklam_kampanya
+    rk = rk[rk["magaza"] == m].set_index("kampanya") if not rk.empty else pd.DataFrame()
+    katsayi = {k: (x.restoran_payi / x.harcama if x.harcama > 0 else 0.0) for k, x in rk.iterrows()}
+    r = r.assign(maliyet=r["harcama"] * r["kampanya"].map(katsayi).fillna(1.0))
+    return r.groupby("gun")[["harcama", "maliyet"]].sum()
+
+
 def trend(a: Analiz, m: str) -> pd.DataFrame:
     """Dönem × platform: sipariş, brüt, iade, kampanya, komisyon, reklam, diğer, restorana kalan."""
     s = _pencere(a.siparis[a.siparis["magaza"] == m], a)
     rf = ty_reklam_faturasi(a, m)
     tr = a.ty_reklam[a.ty_reklam["magaza"] == m] if not a.ty_reklam.empty else BOS
+    rg = ty_reklam_gunluk(a, m)
     yf = a.ys_fatura[a.ys_fatura["magaza"] == m] if not a.ys_fatura.empty else BOS
     satirlar = []
     for b, e in a.donemler:
@@ -592,10 +641,11 @@ def trend(a: Analiz, m: str) -> pd.DataFrame:
                  "iade": x["iade"].sum(), "kampanya": x["kampanya"].sum(), "komisyon": x["komisyon"].sum(),
                  "reklam": x["reklam"].sum(), "diger": x["diger"].sum(), "kalan": x["kalan"].sum(), "reklam_eksik": False}
             if p == TY:
-                # Reklam harcaması raporundan (günün gerçek tüketimi); rapor yoksa faturalanan tutar.
-                # Toplu (peşin) faturalar dönemleri çarpıtmasın diye fatura tarihi kullanılmaz; fark fatura kontrolünde.
+                # Restoranın reklam payı: kampanyaya kesilen Reklam Bedeli, kampanyanın harcama günlerine harcamayla orantılı
+                # dağıtılır (toplu peşin faturalar dönemleri çarpıtmaz; Trendyol'un karşıladığı kısım restorana yazılmaz).
+                # Reklam raporu yoksa fatura tarihine göre faturalanan tutar.
                 if not tr.empty:
-                    ek = tr[(tr["gun"] >= b) & (tr["gun"] <= e)]["harcama"].sum()
+                    ek = rg[(rg.index >= b) & (rg.index <= e)]["maliyet"].sum()
                 else:
                     ek = rf[(rf["gun"] >= b) & (rf["gun"] <= e)]["tutar"].sum() if not rf.empty else 0.0
                 r["reklam"] += ek
@@ -679,6 +729,7 @@ def ty_reklam_donem(a: Analiz, m: str) -> pd.DataFrame:
     rf = ty_reklam_faturasi(a, m)
     rf = _pencere(rf, a) if not rf.empty else rf
     s = _pencere(a.siparis[(a.siparis["magaza"] == m) & (a.siparis["platform"] == TY) & (a.siparis["brut"] > 0)], a)
+    rg = ty_reklam_gunluk(a, m)
     rows = []
     for b, e in a.donemler:
         x = r[(r["gun"] >= b) & (r["gun"] <= e)] if not r.empty else BOS
@@ -687,6 +738,7 @@ def ty_reklam_donem(a: Analiz, m: str) -> pd.DataFrame:
         rows.append({"bas": b, "bit": e, "gun": (e - b).days + 1,
                      "reklam_gun": int((x.groupby("gun")["harcama"].sum() > 0).sum()) if len(x) else 0,
                      "harcama": x["harcama"].sum() if len(x) else 0.0, "fatura": fx["tutar"].sum() if len(fx) else 0.0,
+                     "maliyet": rg[(rg.index >= b) & (rg.index <= e)]["maliyet"].sum() if len(rg) else 0.0,
                      "gosterim": x["gosterim"].sum() if len(x) else 0, "tiklama": x["tiklama"].sum() if len(x) else 0,
                      "satis": x["satis"].sum() if len(x) else 0, "ciro": x["ciro"].sum() if len(x) else 0.0,
                      "yeni": x["yeni"].sum() if len(x) else 0, "ty_siparis": len(sx)})
@@ -801,6 +853,7 @@ def kampanyalar(a: Analiz, m: str) -> pd.DataFrame:
         return t
     # Yemeksepeti'nde kampanya adı yok: işletmenin karşıladıkları ilk kullanım sırasıyla numaralanır
     t = t.sort_values(["platform", "ilk", "ad"]).reset_index(drop=True)
+    t["anahtar"] = t["ad"]
     no = 0
     adlar = []
     for _, r in t.iterrows():
@@ -863,6 +916,190 @@ def algi_donem(a: Analiz, m: str) -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
+# ---------------------------------------------------------------- aylar, günler, reklam etkisi, ay ayrıntısı
+
+GUNLER = ["Pazartesi", "Salı", "Çarşamba", "Perşembe", "Cuma", "Cumartesi", "Pazar"]
+INDIRIM_TOLERANSI = 5.0  # puan: indirim oranı bundan fazla farklı haftalardaki günler baza alınmaz
+BAZ_HAFTA = 4  # tek günlük reklamın bazı: aynı haftagününün ±4 hafta içindeki reklamsız günleri
+ONCE_GUN = 28  # sürekli reklamın bazı: başlamadan önceki 28 gün içindeki reklamsız günler
+
+
+def ay_sonu(d: date) -> date:
+    return (d.replace(day=28) + timedelta(days=4)).replace(day=1) - timedelta(days=1)
+
+
+def aylar(a: Analiz, m: str) -> pd.DataFrame:
+    """Ay başına iki platformun toplamı; 'tam' sütunu ayın bütün günlerinin analizde olup olmadığını söyler."""
+    t = toplam_trend(trend(a, m))
+    if t.empty:
+        return t
+    y = aylik(t)
+    y["tam"] = [b.day == 1 and s >= ay_sonu(b) for b, s in zip(y["bas"], y["bit"])]
+    return y.sort_values("ay").reset_index(drop=True)
+
+
+def gunluk(a: Analiz, m: str) -> pd.DataFrame:
+    """Gün başına iki platformun siparişi, Trendyol reklam harcaması ve reklam türü (tekil / sürekli / boş)."""
+    gunler = list(pd.date_range(a.bas, a.son).date)
+    s = _pencere(a.siparis[a.siparis["magaza"] == m], a)
+    d = pd.DataFrame(index=pd.Index(gunler, name="gun"))
+    for p, k in ((TY, "ty"), (YS, "ys")):
+        x = s[s["platform"] == p]
+        d[f"{k}_siparis"] = x[x["brut"] > 0].groupby("gun").size().reindex(gunler).fillna(0).astype(int).values
+        for c in ("brut", "kampanya", "kalan"):
+            d[f"{k}_{c}"] = x.groupby("gun")[c].sum().reindex(gunler).fillna(0.0).values
+    d["harcama"] = 0.0
+    rg = ty_reklam_gunluk(a, m)
+    d["maliyet"] = rg["maliyet"].reindex(gunler).fillna(0.0).values if len(rg) else 0.0
+    d["tur"] = ""
+    d["kampanya"] = ""
+    r = a.ty_reklam[(a.ty_reklam["magaza"] == m) & (a.ty_reklam["harcama"] > 0)] if not a.ty_reklam.empty else BOS
+    if len(r):
+        d["harcama"] = r.groupby("gun")["harcama"].sum().reindex(gunler).fillna(0.0).values
+        rk = a.ty_reklam_kampanya
+        gun_sayisi = rk[rk["magaza"] == m].set_index("kampanya")["gun"].to_dict()
+        for g_, x in r.groupby("gun"):
+            if g_ in d.index:
+                kamp = sorted(set(x["kampanya"]))
+                d.at[g_, "kampanya"] = ", ".join(kamp)
+                d.at[g_, "tur"] = "tekil" if all(gun_sayisi.get(k, 0) == 1 for k in kamp) else "sürekli"
+    return d
+
+
+def _ty_acilis(d: pd.DataFrame) -> date:
+    """Mağazanın Trendyol'daki ilk siparişli günü: daha önceki boş günler baza alınmaz (mağaza henüz açık değildi)."""
+    dolu = [g_ for g_ in d.index if d.at[g_, "ty_siparis"] > 0]
+    return dolu[0] if dolu else d.index[0]
+
+
+def _haftalik_indirim(d: pd.DataFrame) -> dict:
+    """ISO hafta → Trendyol indirim oranı (puan)."""
+    toplam: dict = {}
+    for g_, r in d.iterrows():
+        k = tuple(pd.Timestamp(g_).isocalendar()[:2])
+        ind, brut = toplam.get(k, (0.0, 0.0))
+        toplam[k] = (ind + r.ty_kampanya, brut + r.ty_brut)
+    return {k: (i / b * 100 if b else np.nan) for k, (i, b) in toplam.items()}
+
+
+def tekil_reklam(a: Analiz, m: str) -> pd.DataFrame:
+    """Tek günlük Trendyol reklamları: o gün, aynı haftagününün reklamsız ve benzer indirimli günleriyle karşılaştırılır.
+    Net etki = (restorana kalan − bazın kalanı) − reklam bedeli; yemek maliyeti dahil değil, kârın üst sınırıdır."""
+    rk = a.ty_reklam_kampanya
+    if rk.empty or a.ty_reklam.empty:
+        return BOS
+    d = gunluk(a, m)
+    acilis = _ty_acilis(d)
+    hafta = _haftalik_indirim(d)
+    hk = lambda g_: hafta.get(tuple(pd.Timestamp(g_).isocalendar()[:2]), np.nan)  # noqa: E731
+    s = _pencere(a.siparis[(a.siparis["magaza"] == m) & (a.siparis["platform"] == TY) & (a.siparis["brut"] > 0)], a)
+    r = a.ty_reklam[(a.ty_reklam["magaza"] == m) & (a.ty_reklam["harcama"] > 0)]
+    rows = []
+    for _, k in rk[(rk["magaza"] == m) & (rk["gun"] == 1)].iterrows():
+        x = r[r["kampanya"] == k.kampanya]
+        gun_ = x["gun"].min()
+        if gun_ < a.bas or gun_ > a.son:
+            continue
+        harcama = x["harcama"].sum()
+        aday = [gun_ + timedelta(days=7 * i) for i in range(-BAZ_HAFTA, BAZ_HAFTA + 1) if i]
+        aday = [g_ for g_ in aday if acilis <= g_ <= a.son and d.at[g_, "harcama"] == 0]
+        ref = hk(gun_)
+        kars = [g_ for g_ in aday if pd.isna(ref) or abs(hk(g_) - ref) <= INDIRIM_TOLERANSI]
+        notlar = []
+        if len(aday) > len(kars):
+            notlar.append(f"{len(aday) - len(kars)} gün farklı indirim döneminde olduğu için baza alınmadı")
+        b = d.loc[kars] if kars else d.iloc[0:0]
+        bas_t = pd.Timestamp(k.baslangic) if k.baslangic is not None and pd.notna(k.baslangic) else None
+        saat = bas_t.time() if bas_t is not None and bas_t.date() == gun_ else None
+
+        def sonra(g_):
+            w = s[s["gun"] == g_]
+            return int((w["zaman"].dt.time >= saat).sum()) if saat else np.nan
+        baz_sip = b["ty_siparis"].mean() if len(b) else np.nan
+        baz_kalan = b["ty_kalan"].mean() if len(b) else np.nan
+        kalan_fark = d.at[gun_, "ty_kalan"] - baz_kalan
+        maliyet = d.at[gun_, "maliyet"]  # restoranın payı; harcamanın bir bölümünü Trendyol karşılamış olabilir
+        if len(kars) < 2:
+            notlar.append("benzer indirim döneminde karşılaştırılabilir gün 2'den az: sonuç güvenilir değil")
+        rows.append({"gun": gun_, "haftagunu": GUNLER[gun_.weekday()], "kampanya": k.kampanya, "saat": saat, "harcama": harcama,
+                     "maliyet": maliyet, "siparis": int(d.at[gun_, "ty_siparis"]), "baz": baz_sip,
+                     "baz_min": b["ty_siparis"].min() if len(b) else np.nan, "baz_max": b["ty_siparis"].max() if len(b) else np.nan,
+                     "fark": d.at[gun_, "ty_siparis"] - baz_sip,
+                     "basabas": maliyet / (baz_kalan / baz_sip) if baz_sip and baz_kalan and baz_sip > 0 else np.nan,
+                     "kalan_fark": kalan_fark, "net": kalan_fark - maliyet,
+                     "saat_sonra": sonra(gun_), "baz_saat_sonra": float(np.mean([sonra(g_) for g_ in kars])) if kars and saat else np.nan,
+                     "karsilastirma": ", ".join(f"{g_.day:02d}.{g_.month:02d}" for g_ in kars),
+                     "guvenilir": len(kars) >= 2, "not": "; ".join(notlar)})
+    return pd.DataFrame(rows)
+
+
+def surekli_reklam(a: Analiz, m: str) -> pd.DataFrame:
+    """Art arda en az 3 gün süren Trendyol reklam dönemleri: dönem içi ile başlamadan önceki reklamsız günler karşılaştırılır."""
+    if a.ty_reklam.empty:
+        return BOS
+    d = gunluk(a, m)
+    gunler = [g_ for g_ in d.index if d.at[g_, "tur"] == "sürekli"]
+    kosular, simdiki = [], []
+    for g_ in gunler:
+        if simdiki and (g_ - simdiki[-1]).days > 1:
+            kosular.append(simdiki)
+            simdiki = []
+        simdiki.append(g_)
+    if simdiki:
+        kosular.append(simdiki)
+
+    def olc(x):
+        return {"gun": len(x), "siparis": x["ty_siparis"].mean() if len(x) else np.nan, "kalan": x["ty_kalan"].mean() if len(x) else np.nan,
+                "indirim": x["ty_kampanya"].sum() / x["ty_brut"].sum() * 100 if len(x) and x["ty_brut"].sum() else np.nan,
+                "harcama": x["harcama"].mean() if len(x) else np.nan, "maliyet": x["maliyet"].mean() if len(x) else np.nan}
+    acilis = _ty_acilis(d)
+    rows = []
+    for k in kosular:
+        if len(k) < 3:
+            continue
+        ic = d.loc[k]
+        once_g = [g_ for g_ in d.index if max(acilis, k[0] - timedelta(days=ONCE_GUN)) <= g_ < k[0] and d.at[g_, "harcama"] == 0]
+        once = olc(d.loc[once_g]) if once_g else olc(d.iloc[0:0])
+        sira = olc(ic)
+        net = (sira["kalan"] - once["kalan"]) - sira["maliyet"] if once["gun"] >= 5 else np.nan
+        rows.append({"bas": k[0], "bit": k[-1], "kampanya": ", ".join(sorted(set(", ".join(ic["kampanya"]).split(", ")))),
+                     "once": once, "sira": sira, "net": net,
+                     "not": "" if once["gun"] >= 5 else "öncesinde karşılaştırmaya yetecek reklamsız gün yok (en az 5 gün gerekir)"})
+    return pd.DataFrame(rows)
+
+
+def ay_ayrintisi(a: Analiz, m: str, bas: date, son: date) -> dict:
+    """Bir ayın saat, haftagünü, platform, ürün ve kampanya kırılımları."""
+    s = a.siparis[(a.siparis["magaza"] == m) & (a.siparis["gun"] >= bas) & (a.siparis["gun"] <= son)]
+    satis = s[s["brut"] > 0]
+    plat = platformlar(a, m)
+    sonuc = {}
+    saat = satis.groupby([satis["zaman"].dt.hour, "platform"]).size().unstack(fill_value=0)
+    sonuc["saat"] = saat.reindex(columns=plat, fill_value=0)
+    gunler = pd.Series(pd.date_range(bas, son)).dt.weekday.value_counts()
+    hg = satis.groupby([satis["zaman"].dt.weekday, "platform"]).size().unstack(fill_value=0).reindex(range(7), fill_value=0)
+    sonuc["haftagunu"] = hg.reindex(columns=plat, fill_value=0).div(gunler.reindex(range(7)).replace(0, np.nan), axis=0)
+    t = trend(a, m)
+    t = t[(t["bas"] >= bas) & (t["bit"] <= son)].groupby("platform")[["siparis", "brut", "kampanya", "komisyon", "reklam", "diger",
+                                                                          "iade", "kalan"]].sum()
+    sonuc["platform"] = t.reindex(plat)
+    u = a.urun
+    if not u.empty:
+        u = u[(u["magaza"] == m) & (u["gun"] >= bas) & (u["gun"] <= son)]
+        sonuc["urun"] = u.groupby(["platform", "urun"], as_index=False).agg(adet=("adet", "sum"), ciro=("ciro", "sum"))
+    k = a.kampanya
+    if not k.empty:
+        k = k[(k["magaza"] == m) & (k["gun"] >= bas) & (k["gun"] <= son)]
+        adlar = kampanyalar(a, m)
+        harita = dict(zip(zip(adlar["platform"], adlar["anahtar"]), adlar["ad"])) if not adlar.empty else {}
+        kk = k.groupby(["platform", "kampanya"], as_index=False).agg(siparis=("siparis", "nunique"), maliyet=("maliyet", "sum"),
+                                                                    platform_maliyet=("platform_maliyet", "sum"),
+                                                                    ilk=("gun", "min"), son=("gun", "max"))
+        kk["ad"] = [harita.get((p, n), n) for p, n in zip(kk["platform"], kk["kampanya"])]
+        sonuc["kampanya"] = kk
+    return sonuc
+
+
 # ---------------------------------------------------------------- uyarılar
 
 def _tl(x: float) -> str:
@@ -897,18 +1134,22 @@ def _uyarilari_topla(a: Analiz) -> None:
                 U.append(Uyari(m, "bilgi", "Trendyol fatura listesi şu reklam kampanyalarının başladığı tarihi kapsamıyor: "
                                + ", ".join(kapsamaz["kampanya"]) + ". Daha eski tarihten indirilmiş liste gerekir."))
             x = x[x["durum"] != "Fatura listesi bu tarihi kapsamıyor"]
-            fark = x["fatura"].sum() - x["harcama"].sum()
-            faturasiz = x[x["durum"] == "Faturası bulunamadı"]
-            ek = f" Hiç faturası bulunmayan kampanya: {', '.join(faturasiz['kampanya'])}." if len(faturasiz) else ""
-            if fark < -50:
-                U.append(Uyari(m, "hata", f"Trendyol reklam harcaması ({_tl(x['harcama'].sum())}) kesilen Reklam Bedeli faturalarından "
-                               f"({_tl(x['fatura'].sum())}) {_tl(-fark)} fazla.{ek} Fark Trendyol'un verdiği bir bakiyeden "
-                               "karşılanmış olabilir; doğrulanmalı."))
-            elif fark > 50:
-                U.append(Uyari(m, "uyari", f"Trendyol Reklam Bedeli faturaları ({_tl(x['fatura'].sum())}) reklam harcamasından "
-                               f"({_tl(x['harcama'].sum())}) {_tl(fark)} fazla: harcanmayan bütçe için iade faturası görünmüyor.{ek}"))
-            elif len(faturasiz):
-                U.append(Uyari(m, "uyari", f"Trendyol reklamı:{ek}"))
+            trendyol = x[x["trendyol_payi"] > 0]
+            fazla = x[x["durum"] == "Fatura harcamadan fazla"]
+            parca = []
+            if trendyol["trendyol_payi"].sum() > 50:
+                ayrinti = [f"{r.kampanya} ({'tamamı' if r.fatura == 0 else 'bir bölümü'}, {_tl(r.trendyol_payi)})"
+                           for r in trendyol.sort_values("ilk").itertuples()]
+                parca.append(f"Bazı reklam kampanyalarında bedelin bir bölümünü ya da tamamını Trendyol karşıladı: toplam "
+                             f"{_tl(trendyol['trendyol_payi'].sum())} ({', '.join(ayrinti)}).")
+            if (fazla["fark"].sum()) > 50:
+                ayrinti = [f"{r.kampanya} ({_tl(r.fark)})" for r in fazla.sort_values("ilk").itertuples()]
+                parca.append(f"Şu kampanyalarda kesilen bedel harcamadan fazla, harcanmayan bütçe için iade faturası görünmüyor: "
+                             f"{', '.join(ayrinti)}.")
+            if parca:
+                parca.append(f"Toplam reklam harcaması {_tl(x['harcama'].sum())}, restorana kesilen Reklam Bedeli "
+                             f"{_tl(x['fatura'].sum())}. Raporda reklam maliyeti olarak restorana kesilen tutar kullanıldı.")
+                U.append(Uyari(m, "bilgi", " ".join(parca)))
         if not a.ty_fatura.empty:
             f = a.ty_fatura[(a.ty_fatura["magaza"] == m)]
             f = f[(f["zaman"].dt.date >= a.bas) & (f["zaman"].dt.date <= a.son)]

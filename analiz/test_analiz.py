@@ -53,7 +53,14 @@ def ornek_veri(d, kazanc="1071.67"):
          "Fatura Tarihi": "07.10.2026 03:00", "Statü": "Faturalandırıldı"},
         {"Fatura No": "GDF1", "Tutar": -37.26, "Fatura Tipi": "Kapıda Ödeme İşlemleri Komisyon Kesinti Faturası",
          "Kategori": "Kesinti Faturası", "Fatura Tarihi": "08.10.2026 02:00", "Statü": "Faturalandırıldı"},
+        {"Fatura No": "GDF2", "Tutar": -30.00, "Fatura Tipi": "Reklam Bedeli", "Kategori": "Kesinti Faturası",
+         "Fatura Tarihi": "05.10.2026 12:00", "Statü": "Faturalandırıldı"},
     ]).to_excel(os.path.join(d, "Faturalar_liste.xlsx"), index=False, sheet_name="Detay")
+    # tek günlük reklam: kampanya adı başlangıç zamanı (05.10 12:00), fatura aynı dakikada kesilmiş
+    pd.DataFrame([{"Şube No": 1, "Şube Adı": "Deneme Pide", "Gün": "2026-10-05", "Reklam Harcaması": 30.0, "Gösterim Sayısı": 100,
+                   "Tıklanma Sayısı": 5, "Satış Adedi": 1, "Yeni Müşteri Sayısı": 1, "Ciro": 200.0, "Tıklanma Başına Maliyet": 6,
+                   "Satış Başına Maliyet": 30, "Tıklanma Oranı": 5, "Reklam Getiri Katsayısı": 6.7, "Bölge Adı": "Bölge 1"}]
+                 ).to_excel(os.path.join(d, "Reklam-05101200(deneme).xlsx"), index=False, sheet_name="Store Reports")
     pd.DataFrame([{"Müşteri Mesajı": "<script>alert(1)</script> soğuktu", "Restoran Cevabı": None, "Sipariş Tarihi": "05.10.2026 19:10",
                    "Değerlendirme Tarihi": "06.10.2026 10:00", "Lezzet Puanı": "2,00", "Servis Puanı": "3,00", "Teslimat Puanı": "1,00",
                    "Ortalama Puan": "2,00", "Beğenilen Ürünler": None, "Platform": "Trendyol Go"}]
@@ -139,7 +146,8 @@ class UctanUca(unittest.TestCase):
         self.assertAlmostEqual(t.loc[hesap.TY, "brut"], 600.0)
         self.assertAlmostEqual(t.loc[hesap.TY, "kampanya"], 50.0)
         self.assertAlmostEqual(t.loc[hesap.TY, "komisyon"], 75.90)
-        self.assertAlmostEqual(t.loc[hesap.TY, "kalan"], 474.10)
+        self.assertAlmostEqual(t.loc[hesap.TY, "reklam"], 30.0)
+        self.assertAlmostEqual(t.loc[hesap.TY, "kalan"], 444.10)  # satıcı hakedişi 474,10 − reklam 30
         self.assertEqual(int(t.loc[hesap.YS, "siparis"]), 2)
         self.assertAlmostEqual(t.loc[hesap.YS, "kampanya"], 225.0)
         self.assertAlmostEqual(t.loc[hesap.YS, "komisyon"], 183.60)
@@ -152,6 +160,23 @@ class UctanUca(unittest.TestCase):
         self.assertIn("300 TL'ye Varan İndirim", k.index)
         self.assertIn("Kampanya 1 (%15 indirim)", k.index)
 
+        # reklam: fatura kampanyaya bağlanır, gün "tekil" sayılır; tek haftalık veride baz yok, sonuç güvenilir değil
+        rk = a.ty_reklam_kampanya.set_index("kampanya")
+        self.assertEqual(rk.loc["05101200", "durum"], "Tutuyor")
+        self.assertEqual(hesap.gunluk(a, "Deneme Pide").loc[date(2026, 10, 5), "tur"], "tekil")
+        tek = hesap.tekil_reklam(a, "Deneme Pide")
+        self.assertEqual(len(tek), 1)
+        self.assertFalse(bool(tek.iloc[0]["guvenilir"]))
+        # ay ve ay ayrıntısı
+        ay = hesap.aylar(a, "Deneme Pide")
+        self.assertEqual(len(ay), 1)
+        self.assertFalse(bool(ay.iloc[0]["tam"]))  # yalnız 1–7 Ekim
+        ayr = hesap.ay_ayrintisi(a, "Deneme Pide", date(2026, 10, 1), date(2026, 10, 7))
+        self.assertEqual(int(ayr["saat"].sum().sum()), 5)
+        self.assertAlmostEqual(ayr["urun"][ayr["urun"]["platform"] == hesap.TY]["ciro"].sum(), 600.0)
+
+        self.assertIn("Ekim 2026", html)
+        self.assertIn("Günlük sipariş ve reklam günleri", html)
         self.assertTrue(html.lower().startswith("<!doctype html"))
         self.assertIn("Deneme Pide", html)
         self.assertIn("&lt;script&gt;alert(1)&lt;/script&gt;", html)
